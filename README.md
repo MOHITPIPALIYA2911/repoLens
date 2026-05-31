@@ -2,6 +2,10 @@
 
 > See your GitHub through a recruiter's eyes.
 
+## Live Demo
+
+https://repo-lens-frontend.vercel.app/
+
 RepoLens is an AI-powered GitHub intelligence platform that analyzes public GitHub repositories and profiles from a recruiter/interviewer perspective. It scores repositories, compares them, ranks them on a leaderboard, collects human feedback, and trains its own custom ML model to make future scoring more meaningful.
 
 The main purpose of RepoLens is not to be just a GitHub API wrapper. The main feature is the **custom RepoLens AI/ML scoring model** that learns from repository features and user feedback.
