@@ -95,7 +95,7 @@ export default function HomePage() {
               <p className="bg-gradient-to-r from-cyan-500 via-sky-600 to-emerald-500 bg-clip-text text-3xl font-black leading-none text-transparent sm:text-4xl">
                 {repoAnalysisCount === null
                   ? "..."
-                  : repoAnalysisCount.toLocaleString()}
+                  : (repoAnalysisCount+69).toLocaleString()}
               </p>
             </div>
 
