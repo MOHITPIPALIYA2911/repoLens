@@ -113,7 +113,7 @@ def upsert_leaderboard_entry(analysis: dict[str, Any]) -> dict[str, Any]:
 
     entries = sorted(
         entries,
-        key=lambda item: item.get("average_score", 0),
+        key=lambda item: item.get("overall_score", 0),
         reverse=True,
     )
 
@@ -129,7 +129,7 @@ def get_top_repositories(limit: int = 10) -> list[dict[str, Any]]:
 
     entries = sorted(
         entries,
-        key=lambda item: item.get("average_score", 0),
+        key=lambda item: item.get("overall_score", 0),
         reverse=True,
     )
 

@@ -402,7 +402,7 @@ export default function LeaderboardPage() {
                                                     {item.name}
                                                 </h2>
 
-                                                <Badge>{item.average_score}/100 Avg</Badge>
+                                                <Badge>{item.overall_score}/100</Badge>
                                                 <Badge variant="secondary">{item.badge}</Badge>
                                             </div>
 
@@ -445,10 +445,11 @@ export default function LeaderboardPage() {
                                                 <p
                                                     className={`${displayFont.className} bg-gradient-to-r from-cyan-500 to-emerald-500 bg-clip-text text-5xl leading-none text-transparent`}
                                                 >
-                                                    {item.average_score}
+                                                    {item.overall_score}
                                                 </p>
 
-                                                <p className="text-xs text-slate-500">average score</p>
+                                                <p className="text-xs text-slate-500">RepoLens score</p>
+                                                {/* <Badge variant="outline">Avg: {item.average_score}/100</Badge> */}
                                             </div>
 
                                             <div className="grid grid-cols-2 gap-2">
@@ -466,7 +467,7 @@ export default function LeaderboardPage() {
 
                                                 <Button asChild variant="outline">
                                                     <a href={item.url} target="_blank" rel="noreferrer">
-                                                        GitHub
+                                                        github
                                                         <ExternalLink className="ml-2 h-4 w-4" />
                                                     </a>
                                                 </Button>
