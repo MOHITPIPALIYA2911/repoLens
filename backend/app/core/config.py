@@ -5,6 +5,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "RepoLens"
     app_env: str = "development"
+    database_url: str
+
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+    supabase_storage_bucket: str = "repolens-models"
 
     github_token: str | None = None
     gemini_api_key: str | None = None

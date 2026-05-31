@@ -3,9 +3,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import joblib
 from sklearn.ensemble import RandomForestRegressor
 
+from app.core.config import get_settings
+from app.db.database import execute, fetch_all, fetch_one
 from app.ml.feature_vectorizer import (
     CATEGORY_SCORE_KEYS,
     FEATURE_VECTOR_NAMES,
@@ -17,16 +20,17 @@ from app.ml.feature_vectorizer import (
 )
 
 
-TRAINING_DATA_FILE = Path("storage/training_data.json")
+settings = get_settings()
+
 MODEL_FILE = Path("storage/models/repolens_repo_model.joblib")
 MODEL_META_FILE = Path("storage/models/repolens_repo_model_meta.json")
+
+MODEL_OBJECT_PATH = "models/repolens_repo_model.joblib"
+MODEL_META_OBJECT_PATH = "models/repolens_repo_model_meta.json"
 
 MODEL_VERSION = "repolens-random-forest-v1"
 MIN_TRAINING_ROWS = 5
 MAX_TRAINING_ROWS = 5000
-ML_WEIGHT = 0.35
-
-FEEDBACK_DATA_FILE = Path("storage/feedback_labels.json")
 FEEDBACK_REPEAT = 4
 
 
@@ -34,28 +38,81 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _read_training_data() -> list[dict[str, Any]]:
-    if not TRAINING_DATA_FILE.exists():
-        return []
+def _storage_enabled() -> bool:
+    return bool(
+        settings.supabase_url
+        and settings.supabase_service_role_key
+        and settings.supabase_storage_bucket
+    )
+
+
+def _storage_url(object_path: str) -> str:
+    return (
+        f"{settings.supabase_url.rstrip('/')}"
+        f"/storage/v1/object/{settings.supabase_storage_bucket}/{object_path}"
+    )
+
+
+def _storage_headers(content_type: str | None = None) -> dict[str, str]:
+    headers = {
+        "apikey": settings.supabase_service_role_key or "",
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        "x-upsert": "true",
+    }
+
+    if content_type:
+        headers["Content-Type"] = content_type
+
+    return headers
+
+
+def _upload_file_to_storage(local_path: Path, object_path: str, content_type: str) -> bool:
+    if not _storage_enabled() or not local_path.exists():
+        return False
 
     try:
-        with TRAINING_DATA_FILE.open("r", encoding="utf-8") as file:
-            data = json.load(file)
+        with local_path.open("rb") as file:
+            response = httpx.post(
+                _storage_url(object_path),
+                headers=_storage_headers(content_type),
+                content=file.read(),
+                timeout=60,
+            )
 
-        if isinstance(data, list):
-            return data
-
-        return []
+        return response.status_code < 400
 
     except Exception:
-        return []
+        return False
 
 
-def _write_training_data(records: list[dict[str, Any]]) -> None:
-    TRAINING_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+def _download_file_from_storage(object_path: str, local_path: Path) -> bool:
+    if not _storage_enabled():
+        return False
 
-    with TRAINING_DATA_FILE.open("w", encoding="utf-8") as file:
-        json.dump(records, file, indent=2)
+    try:
+        response = httpx.get(
+            _storage_url(object_path),
+            headers=_storage_headers(),
+            timeout=60,
+        )
+
+        if response.status_code >= 400:
+            return False
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(response.content)
+
+        return True
+
+    except Exception:
+        return False
+
+
+def _ensure_model_local() -> bool:
+    if MODEL_FILE.exists():
+        return True
+
+    return _download_file_from_storage(MODEL_OBJECT_PATH, MODEL_FILE)
 
 
 def _write_meta(meta: dict[str, Any]) -> None:
@@ -64,8 +121,17 @@ def _write_meta(meta: dict[str, Any]) -> None:
     with MODEL_META_FILE.open("w", encoding="utf-8") as file:
         json.dump(meta, file, indent=2)
 
+    _upload_file_to_storage(
+        MODEL_META_FILE,
+        MODEL_META_OBJECT_PATH,
+        "application/json",
+    )
+
 
 def _read_meta() -> dict[str, Any] | None:
+    if not MODEL_META_FILE.exists():
+        _download_file_from_storage(MODEL_META_OBJECT_PATH, MODEL_META_FILE)
+
     if not MODEL_META_FILE.exists():
         return None
 
@@ -76,19 +142,87 @@ def _read_meta() -> dict[str, Any] | None:
         return None
 
 
+def _count_training_rows() -> int:
+    row = fetch_one("SELECT COUNT(*) AS count FROM training_examples")
+
+    return int(row["count"]) if row else 0
+
+
+def _count_feedback_rows() -> int:
+    row = fetch_one("SELECT COUNT(*) AS count FROM feedback_labels")
+
+    return int(row["count"]) if row else 0
+
+
+def _read_training_data() -> list[dict[str, Any]]:
+    rows = fetch_all(
+        """
+        SELECT
+            repo_url,
+            full_name,
+            features,
+            labels,
+            label_source,
+            feedback,
+            created_at
+        FROM training_examples
+        ORDER BY id DESC
+        LIMIT :limit
+        """,
+        {"limit": MAX_TRAINING_ROWS},
+    )
+
+    rows.reverse()
+
+    return rows
+
+
+def _insert_training_record(record: dict[str, Any]) -> None:
+    execute(
+        """
+        INSERT INTO training_examples (
+            repo_url,
+            full_name,
+            features,
+            labels,
+            label_source,
+            feedback,
+            created_at
+        )
+        VALUES (
+            :repo_url,
+            :full_name,
+            CAST(:features AS JSONB),
+            CAST(:labels AS JSONB),
+            :label_source,
+            CAST(:feedback AS JSONB),
+            NOW()
+        )
+        """,
+        {
+            "repo_url": record.get("repo_url"),
+            "full_name": record.get("full_name"),
+            "features": json.dumps(record.get("features") or {}),
+            "labels": json.dumps(record.get("labels") or {}),
+            "label_source": record.get("label_source"),
+            "feedback": json.dumps(record.get("feedback")),
+        },
+    )
+
+
 def get_model_status() -> dict[str, Any]:
-    records = _read_training_data()
-    feedback_records = _read_feedback_data()
+    model_exists = _ensure_model_local()
     meta = _read_meta()
 
     return {
-        "model_exists": MODEL_FILE.exists(),
+        "model_exists": model_exists,
         "model_version": MODEL_VERSION,
-        "training_rows": len(records),
+        "training_rows": _count_training_rows(),
+        "feedback_rows": _count_feedback_rows(),
         "minimum_training_rows": MIN_TRAINING_ROWS,
-        "is_trained": MODEL_FILE.exists(),
+        "is_trained": model_exists,
+        "storage_enabled": _storage_enabled(),
         "meta": meta,
-        "feedback_rows": len(feedback_records),
     }
 
 
@@ -112,15 +246,9 @@ def save_training_example(analysis: dict[str, Any]) -> dict[str, Any]:
         "created_at": _now(),
     }
 
-    records = _read_training_data()
-    records.append(record)
+    _insert_training_record(record)
 
-    if len(records) > MAX_TRAINING_ROWS:
-        records = records[-MAX_TRAINING_ROWS:]
-
-    _write_training_data(records)
-
-    if len(records) >= MIN_TRAINING_ROWS:
+    if _count_training_rows() >= MIN_TRAINING_ROWS:
         train_repo_model(force=True)
 
     return get_model_status()
@@ -180,6 +308,12 @@ def train_repo_model(force: bool = False) -> dict[str, Any]:
         MODEL_FILE,
     )
 
+    _upload_file_to_storage(
+        MODEL_FILE,
+        MODEL_OBJECT_PATH,
+        "application/octet-stream",
+    )
+
     meta = {
         "model_version": MODEL_VERSION,
         "trained_at": _now(),
@@ -187,7 +321,8 @@ def train_repo_model(force: bool = False) -> dict[str, Any]:
         "feature_count": len(FEATURE_VECTOR_NAMES),
         "score_keys": SCORE_KEYS,
         "model_type": "RandomForestRegressor",
-        "label_source": "weak_rule_score_v1",
+        "label_source": "weak_rule_score_v1 + user_feedback_v1",
+        "storage_uploaded": _storage_enabled(),
     }
 
     _write_meta(meta)
@@ -199,7 +334,7 @@ def train_repo_model(force: bool = False) -> dict[str, Any]:
 
 
 def predict_ml_scores(features: dict[str, Any]) -> dict[str, int] | None:
-    if not MODEL_FILE.exists():
+    if not _ensure_model_local():
         return None
 
     try:
@@ -222,13 +357,30 @@ def _badge_from_score(overall: int) -> str:
         return "Recruiter Ready"
     if overall >= 50:
         return "Needs Improvement"
+
     return "Weak Presentation"
 
+
+def _read_feedback_data() -> list[dict[str, Any]]:
+    return fetch_all(
+        """
+        SELECT
+            repo_url,
+            full_name,
+            quality_label,
+            score_feedback,
+            comment,
+            scores_at_feedback_time,
+            created_at
+        FROM feedback_labels
+        ORDER BY id DESC
+        LIMIT 5000
+        """
+    )
+
+
 def get_dynamic_ml_weight() -> float:
-    try:
-        feedback_count = len(_read_feedback_data())
-    except Exception:
-        feedback_count = 0
+    feedback_count = _count_feedback_rows()
 
     if feedback_count >= 100:
         return 0.70
@@ -241,6 +393,7 @@ def get_dynamic_ml_weight() -> float:
 
     return 0.35
 
+
 def blend_rule_and_ml_scores(
     rule_scores: dict[str, Any],
     ml_scores: dict[str, int] | None,
@@ -250,6 +403,7 @@ def blend_rule_and_ml_scores(
         result["ml_model_used"] = False
         result["score_source"] = "rule_engine"
         result["ml_weight"] = 0.0
+
         return result
 
     ml_weight = get_dynamic_ml_weight()
@@ -285,29 +439,6 @@ def blend_rule_and_ml_scores(
     blended["ml_based_overall"] = ml_scores.get("overall", 0)
 
     return blended
-
-def _read_feedback_data() -> list[dict[str, Any]]:
-    if not FEEDBACK_DATA_FILE.exists():
-        return []
-
-    try:
-        with FEEDBACK_DATA_FILE.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        if isinstance(data, list):
-            return data
-
-        return []
-
-    except Exception:
-        return []
-
-
-def _write_feedback_data(records: list[dict[str, Any]]) -> None:
-    FEEDBACK_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    with FEEDBACK_DATA_FILE.open("w", encoding="utf-8") as file:
-        json.dump(records, file, indent=2)
 
 
 def _quality_to_score(quality_label: str) -> int:
@@ -377,9 +508,36 @@ def save_user_feedback_example(
         "created_at": _now(),
     }
 
-    feedback_records = _read_feedback_data()
-    feedback_records.append(feedback_record)
-    _write_feedback_data(feedback_records)
+    execute(
+        """
+        INSERT INTO feedback_labels (
+            repo_url,
+            full_name,
+            quality_label,
+            score_feedback,
+            comment,
+            scores_at_feedback_time,
+            created_at
+        )
+        VALUES (
+            :repo_url,
+            :full_name,
+            :quality_label,
+            :score_feedback,
+            :comment,
+            CAST(:scores_at_feedback_time AS JSONB),
+            NOW()
+        )
+        """,
+        {
+            "repo_url": feedback_record["repo_url"],
+            "full_name": feedback_record["full_name"],
+            "quality_label": feedback_record["quality_label"],
+            "score_feedback": feedback_record["score_feedback"],
+            "comment": feedback_record["comment"],
+            "scores_at_feedback_time": json.dumps(scores),
+        },
+    )
 
     labels = _build_feedback_labels(
         current_scores=scores,
@@ -397,17 +555,10 @@ def save_user_feedback_example(
         "created_at": _now(),
     }
 
-    training_records = _read_training_data()
-
     for repeat_index in range(FEEDBACK_REPEAT):
         repeated_record = dict(training_record)
         repeated_record["feedback_repeat_index"] = repeat_index
-        training_records.append(repeated_record)
-
-    if len(training_records) > MAX_TRAINING_ROWS:
-        training_records = training_records[-MAX_TRAINING_ROWS:]
-
-    _write_training_data(training_records)
+        _insert_training_record(repeated_record)
 
     train_repo_model(force=True)
 

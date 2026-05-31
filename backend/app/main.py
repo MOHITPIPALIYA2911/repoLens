@@ -12,6 +12,8 @@ from app.api.routes.stats_routes import router as stats_router
 
 from app.api.routes.feedback_routes import router as feedback_router
 
+from app.db.schema import init_db
+
 settings = get_settings()
 
 app = FastAPI(title="RepoLens API")
@@ -32,6 +34,9 @@ app.include_router(stats_router)
 app.include_router(ml_router)
 app.include_router(feedback_router)
 
+@app.on_event("startup")
+def on_startup():
+    init_db()
 
 @app.get("/")
 def root():
